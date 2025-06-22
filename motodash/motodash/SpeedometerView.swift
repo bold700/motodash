@@ -16,6 +16,7 @@ extension View {
 
 final class MapViewModel: ObservableObject {
     let recenteringRequest = PassthroughSubject<Void, Never>()
+    let exportRequest = PassthroughSubject<Void, Never>()
 }
 
 class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
@@ -25,6 +26,7 @@ class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
     @Published var tripDistance: Double = 0.0
     @Published var heading: String = "--"
     @Published var currentLocation: CLLocation?
+    @Published var route: [CLLocation] = []
     @Published var deviceHeading: CLLocationDirection = 0.0
     let userAnnotation = MKPointAnnotation()
     private var lastLocation: CLLocation?
@@ -55,6 +57,11 @@ class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard let location = locations.last else { return }
         currentLocation = location
+        
+        if location.speed > 0 {
+            route.append(location)
+        }
+
         let currentSpeed = max(0, location.speed * 3.6)
         speed = min(currentSpeed, maxSpeed)
         if let last = lastLocation {
@@ -192,6 +199,19 @@ struct MetricView: View {
     }
 }
 
+struct MapButtonStyle: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .font(.system(size: 24))
+            .frame(width: 28, height: 28)
+            .foregroundColor(Color(red: 246/255, green: 166/255, blue: 27/255))
+            .padding(12)
+            .background(Color.black.opacity(0.6))
+            .clipShape(Circle())
+            .shadow(radius: 5)
+    }
+}
+
 struct MapView: UIViewRepresentable {
     @ObservedObject var locationManager: LocationManager
     @ObservedObject var viewModel: MapViewModel
@@ -208,12 +228,20 @@ struct MapView: UIViewRepresentable {
         mapView.showsCompass = true
         mapView.overrideUserInterfaceStyle = .dark
         
-        context.coordinator.setupBindings(for: mapView)
+        context.coordinator.setupBindings(for: mapView, locationManager: locationManager)
         
         return mapView
     }
     
-    func updateUIView(_ uiView: MKMapView, context: Context) {}
+    func updateUIView(_ uiView: MKMapView, context: Context) {
+        updateOverlays(for: uiView)
+    }
+    
+    private func updateOverlays(for mapView: MKMapView) {
+        mapView.removeOverlays(mapView.overlays)
+        let polyline = MKPolyline(coordinates: locationManager.route.map { $0.coordinate }, count: locationManager.route.count)
+        mapView.addOverlay(polyline)
+    }
     
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -222,16 +250,80 @@ struct MapView: UIViewRepresentable {
     class Coordinator: NSObject, MKMapViewDelegate {
         var parent: MapView
         private var recenterSubscription: AnyCancellable?
+        private var exportSubscription: AnyCancellable?
         
         init(parent: MapView) {
             self.parent = parent
         }
         
-        func setupBindings(for mapView: MKMapView) {
+        func setupBindings(for mapView: MKMapView, locationManager: LocationManager) {
             recenterSubscription = parent.viewModel.recenteringRequest
                 .sink { [weak mapView] in
                     mapView?.setUserTrackingMode(.followWithHeading, animated: true)
                 }
+            
+            exportSubscription = parent.viewModel.exportRequest
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] in
+                    self?.exportRouteImage(from: mapView, with: locationManager.route)
+                }
+        }
+        
+        func exportRouteImage(from mapView: MKMapView, with route: [CLLocation]) {
+            guard !route.isEmpty else { return }
+
+            let polyline = MKPolyline(coordinates: route.map { $0.coordinate }, count: route.count)
+
+            let options = MKMapSnapshotter.Options()
+            options.mapRect = polyline.boundingMapRect.insetBy(dx: -1000, dy: -1000) // Add padding
+            options.size = CGSize(width: 1200, height: 1200)
+            options.mapType = mapView.mapType
+            options.showsBuildings = true
+
+            let snapshotter = MKMapSnapshotter(options: options)
+
+            snapshotter.start { [weak self] snapshot, error in
+                guard let snapshot = snapshot, error == nil else {
+                    print("Snapshot error: \(error?.localizedDescription ?? "unknown error")")
+                    return
+                }
+
+                let image = UIGraphicsImageRenderer(size: options.size).image { _ in
+                    snapshot.image.draw(at: .zero)
+
+                    let points = route.map { snapshot.point(for: $0.coordinate) }
+                    let path = UIBezierPath()
+                    path.move(to: points[0])
+
+                    for i in 1..<points.count {
+                        path.addLine(to: points[i])
+                    }
+
+                    UIColor(red: 246/255, green: 166/255, blue: 27/255, alpha: 1.0).setStroke()
+                    path.lineWidth = 5
+                    path.lineCapStyle = .round
+                    path.stroke()
+                }
+
+                self?.share(image: image)
+            }
+        }
+
+        private func share(image: UIImage) {
+            let activityViewController = UIActivityViewController(activityItems: [image], applicationActivities: nil)
+            let keyWindow = UIApplication.shared.windows.first(where: { $0.isKeyWindow })
+            keyWindow?.rootViewController?.present(activityViewController, animated: true, completion: nil)
+        }
+        
+        func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
+            if let polyline = overlay as? MKPolyline {
+                let renderer = MKPolylineRenderer(polyline: polyline)
+                renderer.strokeColor = UIColor(red: 246/255, green: 166/255, blue: 27/255, alpha: 1.0)
+                renderer.lineWidth = 4
+                renderer.lineCap = .round
+                return renderer
+            }
+            return MKOverlayRenderer(overlay: overlay)
         }
     }
 }
@@ -255,19 +347,28 @@ struct MapViewWithSpeedometer: View {
     }
     
     var portraitOverlay: some View {
-        ZStack(alignment: .bottomTrailing) {
+        ZStack {
             VStack {
                 CompactSpeedometerView()
                     .padding(.top)
                 Spacer()
             }
             
-            recenterButton
+            VStack {
+                Spacer()
+                HStack {
+                    exportButton
+                    Spacer()
+                    recenterButton
+                }
+            }
+            .padding()
+            .padding(.bottom, 20)
         }
     }
     
     var landscapeOverlay: some View {
-        ZStack(alignment: .bottomTrailing) {
+        ZStack {
             HStack {
                 VStack(alignment: .leading, spacing: 20) {
                     MetricView(value: String(format: "%.0f", locationManager.speed), label: "KM/H", fixedWidth: true)
@@ -279,7 +380,15 @@ struct MapViewWithSpeedometer: View {
                 Spacer()
             }
             
-            recenterButton
+            HStack {
+                Spacer()
+                VStack(spacing: 16) {
+                    exportButton
+                    recenterButton
+                }
+            }
+            .padding()
+            .padding(.bottom, 20)
         }
     }
     
@@ -288,15 +397,17 @@ struct MapViewWithSpeedometer: View {
             viewModel.recenteringRequest.send()
         }) {
             Image(systemName: "location.north.line.fill")
-                .font(.system(size: 24))
-                .foregroundColor(Color(red: 246/255, green: 166/255, blue: 27/255))
-                .padding(12)
-                .background(Color.black.opacity(0.6))
-                .clipShape(Circle())
-                .shadow(radius: 5)
+                .modifier(MapButtonStyle())
         }
-        .padding()
-        .padding(.bottom, 20)
+    }
+    
+    var exportButton: some View {
+        Button(action: {
+            viewModel.exportRequest.send()
+        }) {
+            Image(systemName: "square.and.arrow.up")
+                .modifier(MapButtonStyle())
+        }
     }
 }
 
