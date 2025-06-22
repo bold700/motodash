@@ -311,8 +311,11 @@ struct MapView: UIViewRepresentable {
 
         private func share(image: UIImage) {
             let activityViewController = UIActivityViewController(activityItems: [image], applicationActivities: nil)
-            let keyWindow = UIApplication.shared.windows.first(where: { $0.isKeyWindow })
-            keyWindow?.rootViewController?.present(activityViewController, animated: true, completion: nil)
+            
+            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+               let window = windowScene.windows.first(where: { $0.isKeyWindow }) {
+                window.rootViewController?.present(activityViewController, animated: true, completion: nil)
+            }
         }
         
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
