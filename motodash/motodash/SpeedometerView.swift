@@ -354,16 +354,14 @@ struct MapViewWithSpeedometer: View {
                 Spacer()
             }
             
-            VStack {
+            HStack {
                 Spacer()
-                HStack {
+                VStack(spacing: 16) {
                     exportButton
-                    Spacer()
                     recenterButton
                 }
             }
-            .padding()
-            .padding(.bottom, 20)
+            .padding(.trailing)
         }
     }
     
